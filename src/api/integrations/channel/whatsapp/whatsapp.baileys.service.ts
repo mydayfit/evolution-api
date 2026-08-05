@@ -249,6 +249,7 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly msgRetryCounterCache: CacheStore = new NodeCache();
   private readonly userDevicesCache: CacheStore = new NodeCache({ stdTTL: 300000, useClones: false });
   private endSession = false;
+  private isDeleting = false;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
 
@@ -265,10 +266,38 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async logoutInstance() {
+    this.isDeleting = true;
+    this.endSession = true;
     this.messageProcessor.onDestroy();
-    await this.client?.logout('Log out instance: ' + this.instanceName);
 
-    this.client?.ws?.close();
+    if (this.client) {
+      try {
+        await this.client.logout('Log out instance: ' + this.instanceName);
+      } catch (error) {
+        this.logger.warn(
+          `logoutInstance: client.logout() failed (${(error as Error)?.message}), continuing local cleanup`,
+        );
+      }
+
+      try {
+        this.client.ws?.close();
+        this.client.end(new Error('Instance logout'));
+      } catch {
+        // The socket may already be closed. Local cleanup must remain idempotent.
+      }
+    }
+
+    this.stateConnection = { state: 'close', statusReason: DisconnectReason.loggedOut };
+    this.instance.qrcode = { count: 0 };
+
+    await this.prismaRepository.instance.update({
+      where: { id: this.instanceId },
+      data: {
+        connectionStatus: 'close',
+        disconnectionAt: new Date(),
+        disconnectionReasonCode: DisconnectReason.loggedOut,
+      },
+    });
 
     const db = this.configService.get<Database>('DATABASE');
     const cache = this.configService.get<CacheConf>('CACHE');
@@ -292,10 +321,7 @@ export class BaileysStartupService extends ChannelStartupService {
       await authState.removeCreds();
     }
 
-    const sessionExists = await this.prismaRepository.session.findFirst({ where: { sessionId: this.instanceId } });
-    if (sessionExists) {
-      await this.prismaRepository.session.delete({ where: { sessionId: this.instanceId } });
-    }
+    await this.prismaRepository.session.deleteMany({ where: { sessionId: this.instanceId } });
   }
 
   public async getProfileName() {
@@ -425,6 +451,22 @@ export class BaileysStartupService extends ChannelStartupService {
 
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+
+      await this.prismaRepository.instance.update({
+        where: { id: this.instanceId },
+        data: {
+          connectionStatus: 'close',
+          disconnectionAt: new Date(),
+          disconnectionReasonCode: statusCode,
+          disconnectionObject: JSON.stringify(lastDisconnect),
+        },
+      });
+
+      if (this.isDeleting || this.endSession) {
+        this.sendDataWebhook(Events.CONNECTION_UPDATE, { instance: this.instance.name, ...this.stateConnection });
+        return;
+      }
+
       const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
@@ -436,16 +478,6 @@ export class BaileysStartupService extends ChannelStartupService {
           disconnectionAt: new Date(),
           disconnectionReasonCode: statusCode,
           disconnectionObject: JSON.stringify(lastDisconnect),
-        });
-
-        await this.prismaRepository.instance.update({
-          where: { id: this.instanceId },
-          data: {
-            connectionStatus: 'close',
-            disconnectionAt: new Date(),
-            disconnectionReasonCode: statusCode,
-            disconnectionObject: JSON.stringify(lastDisconnect),
-          },
         });
 
         if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
@@ -694,6 +726,7 @@ export class BaileysStartupService extends ChannelStartupService {
     };
 
     this.endSession = false;
+    this.isDeleting = false;
 
     this.client = makeWASocket(socketConfig);
 
