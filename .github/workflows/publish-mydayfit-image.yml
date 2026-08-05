@@ -6,6 +6,10 @@ on:
       - agent/fix-whatsapp-connection-state
     paths:
       - .github/workflows/publish-mydayfit-image.yml
+      - Dockerfile
+      - package.json
+      - package-lock.json
+      - src/**
   workflow_dispatch:
 
 permissions:
@@ -41,11 +45,3 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Make the container package public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          gh api --method PATCH
-          /orgs/${{ github.repository_owner }}/packages/container/evolution-api
-          -f visibility=public
