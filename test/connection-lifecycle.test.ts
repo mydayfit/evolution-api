@@ -195,4 +195,58 @@ describe('WhatsApp connection lifecycle', () => {
 
     assert.equal(connectionUpdates, 0);
   });
+
+  it('waits for Chatwoot provider cache invalidation after rotating credentials', async () => {
+    const calls: string[] = [];
+    let releaseCache: () => void;
+    let markCacheStarted: () => void;
+    const cacheGate = new Promise<void>((resolve) => {
+      releaseCache = resolve;
+    });
+    const cacheStarted = new Promise<void>((resolve) => {
+      markCacheStarted = resolve;
+    });
+    const context = {
+      configService: {
+        get: (key: string) => (key === 'CHATWOOT' ? { ENABLED: true } : {}),
+      },
+      instanceId: 'instance-id',
+      localChatwoot: { enabled: true, token: 'old-token' },
+      prismaRepository: {
+        chatwoot: {
+          findUnique: async () => ({ instanceId: 'instance-id' }),
+          update: async () => calls.push('provider.updated'),
+        },
+      },
+      clearCacheChatwoot: async () => {
+        calls.push('cache.start');
+        markCacheStarted();
+        await cacheGate;
+        calls.push('cache.end');
+      },
+    };
+    let settled = false;
+
+    const update = ChannelStartupService.prototype.setChatwoot
+      .call(context as any, {
+        enabled: true,
+        accountId: '11',
+        token: 'new-token',
+        url: 'https://chatwoot.example.com',
+      })
+      .then(() => {
+        settled = true;
+      });
+    await cacheStarted;
+
+    assert.deepEqual(calls, ['provider.updated', 'cache.start']);
+    assert.equal(settled, false);
+
+    releaseCache!();
+    await update;
+
+    assert.equal(settled, true);
+    assert.equal(context.localChatwoot.token, 'new-token');
+    assert.deepEqual(calls, ['provider.updated', 'cache.start', 'cache.end']);
+  });
 });
