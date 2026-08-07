@@ -126,7 +126,44 @@ export class WAMonitoringService {
       },
     });
 
-    return instances;
+    return Promise.all(
+      instances.map(async (instance) => ({
+        ...instance,
+        connectionStatus: await this.reconcileConnectionState(instance.name, instance.connectionStatus),
+      })),
+    );
+  }
+
+  public async reconcileConnectionState(instanceName: string, storedState?: string): Promise<string> {
+    const instance = this.waInstances[instanceName];
+    const memoryState = instance?.connectionStatus?.state as string | undefined;
+    const socketOpen = instance?.client?.ws?.isOpen;
+    const staleOpenSocket = memoryState === 'open' && socketOpen === false;
+    const effectiveState = staleOpenSocket ? 'close' : (memoryState ?? storedState ?? 'close');
+
+    if (staleOpenSocket && instance?.stateConnection) {
+      instance.stateConnection = { ...instance.stateConnection, state: 'close' };
+    }
+
+    const shouldPersistClose =
+      effectiveState === 'close' && (staleOpenSocket || (storedState !== undefined && storedState !== 'close'));
+
+    if (shouldPersistClose) {
+      try {
+        await this.prismaRepository.instance.update({
+          where: { name: instanceName },
+          data: { connectionStatus: 'close', disconnectionAt: new Date() },
+        });
+      } catch (error) {
+        this.logger.warn({
+          message: 'Unable to persist reconciled WhatsApp connection state',
+          instanceName,
+          error,
+        });
+      }
+    }
+
+    return effectiveState;
   }
 
   public async instanceInfoById(instanceId?: string, number?: string) {

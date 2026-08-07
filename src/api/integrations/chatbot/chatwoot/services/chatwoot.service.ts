@@ -2465,27 +2465,14 @@ export class ChatwootService {
         const waInstance = this.waMonitor.waInstances[instance.instanceName];
         if (!waInstance) return;
 
-        const now = Date.now();
-        const timeSinceLastNotification = now - (waInstance.lastConnectionNotification || 0);
+        // Consume the real QR state synchronously before the first await. This
+        // makes concurrent `open` events idempotent and keeps automatic socket
+        // reconnects from creating user-visible connection messages.
+        if (!waInstance.consumeQrConnectionNotification()) return;
 
-        // Se a conexão foi estabelecida via QR code, notifica imediatamente.
-        if (waInstance.qrCode && waInstance.qrCode.count > 0) {
-          const msgConnection = i18next.t('cw.inbox.connected');
-          await this.createBotMessage(instance, msgConnection, 'incoming');
-          waInstance.qrCode.count = 0;
-          waInstance.lastConnectionNotification = now;
-          chatwootImport.clearAll(instance);
-        }
-        // Se não foi via QR code, verifica o throttling.
-        else if (timeSinceLastNotification >= 30000) {
-          const msgConnection = i18next.t('cw.inbox.connected');
-          await this.createBotMessage(instance, msgConnection, 'incoming');
-          waInstance.lastConnectionNotification = now;
-        } else {
-          this.logger.warn(
-            `Connection notification skipped for ${instance.instanceName} - too frequent (${timeSinceLastNotification}ms since last)`,
-          );
-        }
+        const msgConnection = i18next.t('cw.inbox.connected');
+        await this.createBotMessage(instance, msgConnection, 'incoming');
+        chatwootImport.clearAll(instance);
       }
 
       if (event === 'qrcode.updated') {

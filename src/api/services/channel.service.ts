@@ -38,6 +38,18 @@ export class ChannelStartupService {
   public readonly localSettings: wa.LocalSettings = {};
   public readonly localWebhook: wa.LocalWebHook = {};
 
+  /**
+   * Atomically consumes the QR marker used by Chatwoot to emit the one-time
+   * connection confirmation. The qrCode getter returns a copy, so mutating it
+   * does not clear the underlying instance state.
+   */
+  public consumeQrConnectionNotification(): boolean {
+    if (!this.instance.qrcode?.count) return false;
+
+    this.instance.qrcode.count = 0;
+    return true;
+  }
+
   public chatwootService = new ChatwootService(
     waMonitor,
     this.configService,

@@ -394,7 +394,7 @@ export class InstanceController {
     return {
       instance: {
         instanceName: instanceName,
-        state: this.waMonitor.waInstances[instanceName]?.connectionStatus?.state,
+        state: await this.waMonitor.reconcileConnectionState(instanceName),
       },
     };
   }
@@ -434,14 +434,14 @@ export class InstanceController {
   }
 
   public async logout({ instanceName }: InstanceDto) {
-    const { instance } = await this.connectionState({ instanceName });
-
-    if (instance.state === 'close') {
-      throw new BadRequestException('The "' + instanceName + '" instance is not connected');
-    }
-
     try {
-      await this.waMonitor.waInstances[instanceName]?.logoutInstance();
+      const instance = this.waMonitor.waInstances[instanceName];
+
+      if (instance?.logoutInstance) {
+        await instance.logoutInstance();
+      } else {
+        await this.waMonitor.cleaningUp(instanceName);
+      }
 
       return { status: 'SUCCESS', error: false, response: { message: 'Instance logged out' } };
     } catch (error) {
