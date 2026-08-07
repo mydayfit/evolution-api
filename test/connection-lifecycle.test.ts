@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { BaileysStartupService } from '../src/api/integrations/channel/whatsapp/whatsapp.baileys.service';
+import { ChannelStartupService } from '../src/api/services/channel.service';
 import { WAMonitoringService } from '../src/api/services/monitor.service';
 
 describe('WhatsApp connection lifecycle', () => {
@@ -102,5 +103,96 @@ describe('WhatsApp connection lifecycle', () => {
     );
 
     assert.equal(state, 'open');
+  });
+
+  it('consumes a QR connection notification exactly once', () => {
+    const context = {
+      instance: {
+        qrcode: {
+          count: 4,
+          code: 'qr-code',
+          pairingCode: 'pairing-code',
+        },
+      },
+    };
+
+    const first = ChannelStartupService.prototype.consumeQrConnectionNotification.call(context as any);
+    const second = ChannelStartupService.prototype.consumeQrConnectionNotification.call(context as any);
+
+    assert.equal(first, true);
+    assert.equal(second, false);
+    assert.equal(context.instance.qrcode.count, 0);
+    assert.equal(context.instance.qrcode.code, 'qr-code');
+    assert.equal(context.instance.qrcode.pairingCode, 'pairing-code');
+  });
+
+  it('serializes connection updates before processing the next event', async () => {
+    const calls: string[] = [];
+    let processEvents: (events: any) => Promise<void>;
+    let releaseConnectionUpdate: () => void;
+    const connectionUpdateGate = new Promise<void>((resolve) => {
+      releaseConnectionUpdate = resolve;
+    });
+    const client = {
+      ev: {
+        process: (handler: (events: any) => Promise<void>) => {
+          processEvents = handler;
+        },
+      },
+    };
+    const context = {
+      client,
+      eventProcessingQueue: Promise.resolve(),
+      endSession: false,
+      configService: { get: () => ({}) },
+      findSettings: async () => ({}),
+      connectionUpdate: async () => {
+        calls.push('connection.start');
+        await connectionUpdateGate;
+        calls.push('connection.end');
+      },
+      instance: { authState: { saveCreds: () => calls.push('creds.save') } },
+      logger: { error: (error: unknown) => assert.fail(String(error)) },
+    };
+
+    BaileysStartupService.prototype['eventHandler'].call(context as any);
+    await processEvents!({ 'connection.update': { connection: 'close' }, 'creds.update': {} });
+    await Promise.resolve();
+
+    assert.deepEqual(calls, ['connection.start']);
+
+    releaseConnectionUpdate!();
+    await context.eventProcessingQueue;
+
+    assert.deepEqual(calls, ['connection.start', 'connection.end', 'creds.save']);
+  });
+
+  it('ignores queued events from a socket replaced during reconnect', async () => {
+    let processEvents: (events: any) => Promise<void>;
+    let connectionUpdates = 0;
+    const staleClient = {
+      ev: {
+        process: (handler: (events: any) => Promise<void>) => {
+          processEvents = handler;
+        },
+      },
+    };
+    const context = {
+      client: staleClient,
+      eventProcessingQueue: Promise.resolve(),
+      endSession: false,
+      connectionUpdate: async () => {
+        connectionUpdates += 1;
+      },
+      logger: { error: (error: unknown) => assert.fail(String(error)) },
+    };
+
+    BaileysStartupService.prototype['eventHandler'].call(context as any);
+    context.client = { ev: { process: () => undefined } };
+
+    await processEvents!({ 'connection.update': { connection: 'close' } });
+    await context.eventProcessingQueue;
+
+    assert.equal(connectionUpdates, 0);
   });
 });

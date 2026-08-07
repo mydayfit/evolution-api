@@ -1906,9 +1906,17 @@ export class BaileysStartupService extends ChannelStartupService {
   };
 
   private eventHandler() {
-    this.client.ev.process(async (events) => {
+    const eventClient = this.client;
+
+    eventClient.ev.process(async (events) => {
       this.eventProcessingQueue = this.eventProcessingQueue.then(async () => {
         try {
+          // A reconnect replaces this.client while the previous socket can still
+          // have queued events. Never let those stale events act on the new socket.
+          if (eventClient !== this.client) {
+            return;
+          }
+
           if (!this.endSession) {
             const database = this.configService.get<Database>('DATABASE');
             const settings = await this.findSettings();
@@ -1933,7 +1941,13 @@ export class BaileysStartupService extends ChannelStartupService {
             }
 
             if (events['connection.update']) {
-              this.connectionUpdate(events['connection.update']);
+              // Keep connection transitions inside the shared event queue. Without
+              // awaiting this call, repeated close events can create parallel clients.
+              await this.connectionUpdate(events['connection.update']);
+
+              if (eventClient !== this.client) {
+                return;
+              }
             }
 
             if (events['creds.update']) {
