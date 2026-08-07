@@ -467,7 +467,16 @@ export class BaileysStartupService extends ChannelStartupService {
         return;
       }
 
-      const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
+      // A replacement means WhatsApp accepted another socket for these credentials.
+      // Reconnecting this socket immediately starts a conflict loop; wait for an
+      // explicit reconnect so the previous client can be cleaned up first.
+      const codesToNotReconnect = [
+        DisconnectReason.loggedOut,
+        DisconnectReason.forbidden,
+        DisconnectReason.connectionReplaced,
+        402,
+        406,
+      ];
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
         await this.connectToWhatsapp(this.phoneNumber);
