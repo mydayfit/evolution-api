@@ -196,6 +196,42 @@ describe('WhatsApp connection lifecycle', () => {
     assert.equal(connectionUpdates, 0);
   });
 
+  it('does not reconnect a socket that WhatsApp reports as replaced', async () => {
+    const calls: string[] = [];
+    const context = {
+      isDeleting: false,
+      endSession: false,
+      instance: { name: 'playground' },
+      instanceId: 'instance-id',
+      stateConnection: { state: 'open', statusReason: 200 },
+      prismaRepository: {
+        instance: { update: async () => calls.push('instance.update') },
+      },
+      connectToWhatsapp: async () => calls.push('connection.reconnect'),
+      sendDataWebhook: () => calls.push('webhook.send'),
+      configService: {
+        get: (key: string) => (key === 'CHATWOOT' ? { ENABLED: false } : {}),
+      },
+      eventEmitter: { emit: () => calls.push('instance.logout') },
+      client: {
+        ws: { close: () => calls.push('socket.close') },
+        end: () => calls.push('client.end'),
+      },
+    };
+
+    await BaileysStartupService.prototype['connectionUpdate'].call(context as any, {
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 440 } } },
+    });
+
+    assert.equal(context.stateConnection.state, 'close');
+    assert.equal(context.stateConnection.statusReason, 440);
+    assert.ok(!calls.includes('connection.reconnect'));
+    assert.ok(calls.includes('instance.logout'));
+    assert.ok(calls.includes('socket.close'));
+    assert.ok(calls.includes('client.end'));
+  });
+
   it('waits for Chatwoot provider cache invalidation after rotating credentials', async () => {
     const calls: string[] = [];
     let releaseCache: () => void;
