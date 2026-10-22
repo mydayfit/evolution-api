@@ -16,9 +16,13 @@ permissions:
   contents: read
   packages: write
 
+env:
+  CANDIDATE_IMAGE: ghcr.io/mydayfit/evolution-api:2.3.7-mydayfit.1-node24.22.1-20261021
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -33,15 +37,59 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish Linux AMD64 image
+      - name: Build Linux AMD64 candidate
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
-          push: true
-          tags: ghcr.io/mydayfit/evolution-api:2.3.7-mydayfit.1
+          push: false
+          load: true
+          tags: ${{ env.CANDIDATE_IMAGE }}
           labels: |
             org.opencontainers.image.source=https://github.com/mydayfit/evolution-api
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify candidate without network, credentials, or mounts
+        run: |
+          docker run --rm -i --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1g --entrypoint node \
+            "$CANDIDATE_IMAGE" <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          (async () => {
+            assert.equal(process.version, 'v24.22.1');
+            assert.match(fs.readFileSync('/etc/alpine-release', 'utf8'), /^3\.24\./);
+            assert.equal(require('./package.json').version, '2.3.7');
+            assert.ok(fs.statSync('dist/main.js').size > 0);
+            const sharp = require('sharp');
+            const png = await sharp({ create: { width: 1, height: 1, channels: 3, background: 'white' } }).png().toBuffer();
+            assert.equal((await sharp(png).metadata()).format, 'png');
+            const engineDir = './node_modules/.prisma/client';
+            const engine = fs.readdirSync(engineDir).find(name => /^libquery_engine.*\.so\.node$/.test(name));
+            assert.ok(engine, 'Generated Prisma native engine must be present');
+            assert.ok(require(`${engineDir}/${engine}`).version().commit);
+            const { PrismaClient } = require('@prisma/client');
+            const prisma = new PrismaClient();
+            await prisma.$disconnect();
+            const { initAuthCreds } = await import('baileys');
+            const creds = initAuthCreds();
+            assert.equal(creds.noiseKey.private.length, 32);
+            assert.equal(creds.signedIdentityKey.private.length, 32);
+            console.log(JSON.stringify({ node: process.version, alpine: fs.readFileSync('/etc/alpine-release', 'utf8').trim(), app: '2.3.7', sharp: 'pass', prismaNativeEngine: 'pass', baileysKeyGeneration: 'pass', databaseConnected: false }));
+          })().catch(error => { console.error(error.name, error.message); process.exit(1); });
+          NODE
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 128m --entrypoint ffmpeg \
+            "$CANDIDATE_IMAGE" -version
+
+      - name: Publish verified candidate only
+        run: docker push "$CANDIDATE_IMAGE"
+
+      - name: Record immutable candidate identity
+        run: |
+          docker image inspect "$CANDIDATE_IMAGE" \
+            --format '{{json .RepoDigests}}' >> "$GITHUB_STEP_SUMMARY"
+          docker image inspect "$CANDIDATE_IMAGE" \
+            --format '{{json .Config.Labels}}' >> "$GITHUB_STEP_SUMMARY"
